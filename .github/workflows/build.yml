@@ -1,0 +1,182 @@
+name: SC_BUILD - Flutter APK Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Build type: flutter_zip or web_apk"
+        required: true
+        default: "flutter_zip"
+      build_mode:
+        description: "Build mode: release or debug"
+        required: true
+        default: "release"
+      zip_download_url:
+        description: "URL to download Flutter project ZIP (for flutter_zip builds)"
+        required: false
+        default: ""
+      web_url:
+        description: "Website URL to wrap in WebView (for web_apk builds)"
+        required: false
+        default: ""
+      app_name:
+        description: "Custom app name"
+        required: false
+        default: "SC_BUILD_App"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Setup Flutter SDK
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.24.5"
+          channel: "stable"
+          cache: true
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK Licenses
+        run: yes | sdkmanager --licenses || true
+
+      - name: Install build tools and platform
+        run: |
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+
+      - name: Prepare Flutter Project (flutter_zip)
+        if: ${{ github.event.inputs.build_type == 'flutter_zip' }}
+        run: |
+          echo "📦 Downloading Flutter project ZIP..."
+          curl -L -o project.zip "${{ github.event.inputs.zip_download_url }}"
+          echo "📂 Extracting ZIP..."
+          unzip -q project.zip -d extracted_project
+          # Cari direktori root Flutter (berisi pubspec.yaml)
+          FLUTTER_ROOT=$(find extracted_project -maxdepth 3 -name "pubspec.yaml" | head -1 | xargs dirname)
+          if [ -z "$FLUTTER_ROOT" ]; then
+            echo "❌ ERROR: pubspec.yaml tidak ditemukan dalam ZIP!"
+            exit 1
+          fi
+          echo "✅ Flutter root ditemukan: $FLUTTER_ROOT"
+          echo "FLUTTER_ROOT=$FLUTTER_ROOT" >> $GITHUB_ENV
+
+      - name: Prepare WebView Flutter Project (web_apk)
+        if: ${{ github.event.inputs.build_type == 'web_apk' }}
+        run: |
+          echo "🌐 Creating WebView Flutter project..."
+          flutter create --org com.scbuild --project-name webview_app webview_project
+          cd webview_project
+          # Tambah dependency webview_flutter
+          flutter pub add webview_flutter
+          # Ganti main.dart dengan WebView wrapper
+          cat > lib/main.dart << 'DARTEOF'
+          import 'package:flutter/material.dart';
+          import 'package:webview_flutter/webview_flutter.dart';
+
+          void main() {
+            runApp(const MyApp());
+          }
+
+          class MyApp extends StatelessWidget {
+            const MyApp({super.key});
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(
+                title: '${{ github.event.inputs.app_name }}',
+                debugShowCheckedModeBanner: false,
+                theme: ThemeData(primarySwatch: Colors.blue),
+                home: const WebViewScreen(),
+              );
+            }
+          }
+
+          class WebViewScreen extends StatefulWidget {
+            const WebViewScreen({super.key});
+            @override
+            State<WebViewScreen> createState() => _WebViewScreenState();
+          }
+
+          class _WebViewScreenState extends State<WebViewScreen> {
+            late final WebViewController _controller;
+            @override
+            void initState() {
+              super.initState();
+              _controller = WebViewController()
+                ..setJavaScriptMode(JavaScriptMode.unrestricted)
+                ..loadRequest(Uri.parse('${{ github.event.inputs.web_url }}'));
+            }
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(
+                body: SafeArea(child: WebViewWidget(controller: _controller)),
+              );
+            }
+          }
+          DARTEOF
+          # Set minSdkVersion untuk webview_flutter
+          sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 19/g' android/app/build.gradle || \
+          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 19/g' android/app/build.gradle || true
+          cd ..
+          echo "FLUTTER_ROOT=webview_project" >> $GITHUB_ENV
+
+      - name: Get Flutter Dependencies
+        run: |
+          cd "$FLUTTER_ROOT"
+          flutter pub get
+
+      - name: Build APK (Release)
+        if: ${{ github.event.inputs.build_mode == 'release' }}
+        run: |
+          cd "$FLUTTER_ROOT"
+          flutter build apk --release --no-tree-shake-icons
+          APK_PATH=$(find . -name "*.apk" -path "*/release/*" | head -1)
+          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+          echo "✅ Build Release selesai: $APK_PATH"
+
+      - name: Build APK (Debug)
+        if: ${{ github.event.inputs.build_mode == 'debug' }}
+        run: |
+          cd "$FLUTTER_ROOT"
+          flutter build apk --debug --no-tree-shake-icons
+          APK_PATH=$(find . -name "*.apk" -path "*/debug/*" | head -1)
+          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+          echo "✅ Build Debug selesai: $APK_PATH"
+
+      - name: Rename APK
+        run: |
+          cd "$FLUTTER_ROOT"
+          APP_NAME="${{ github.event.inputs.app_name }}"
+          MODE="${{ github.event.inputs.build_mode }}"
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          NEW_NAME="${APP_NAME}_${MODE}_${TIMESTAMP}.apk"
+          cp "$APK_PATH" "/tmp/${NEW_NAME}"
+          echo "FINAL_APK=/tmp/${NEW_NAME}" >> $GITHUB_ENV
+          echo "APK_FILENAME=${NEW_NAME}" >> $GITHUB_ENV
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-output
+          path: ${{ env.FINAL_APK }}
+          retention-days: 7
+
+      - name: Build Summary
+        run: |
+          echo "## ✅ Build Berhasil!" >> $GITHUB_STEP_SUMMARY
+          echo "| Info | Detail |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Type | ${{ github.event.inputs.build_type }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Mode | ${{ github.event.inputs.build_mode }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| APK File | $APK_FILENAME |" >> $GITHUB_STEP_SUMMARY
