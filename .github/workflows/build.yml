@@ -12,11 +12,11 @@ on:
         required: true
         default: "release"
       zip_download_url:
-        description: "URL to download Flutter project ZIP (for flutter_zip builds)"
+        description: "URL to download Flutter project ZIP"
         required: false
         default: ""
       web_url:
-        description: "Website URL to wrap in WebView (for web_apk builds)"
+        description: "Website URL to wrap in WebView"
         required: false
         default: ""
       app_name:
@@ -53,42 +53,33 @@ jobs:
         run: yes | sdkmanager --licenses || true
 
       - name: Install build tools and platform
-        run: |
-          sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+        run: sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
 
       - name: Prepare Flutter Project (flutter_zip)
         if: ${{ github.event.inputs.build_type == 'flutter_zip' }}
         run: |
-          echo "📦 Downloading Flutter project ZIP..."
+          echo "Downloading Flutter project ZIP..."
           curl -L -o project.zip "${{ github.event.inputs.zip_download_url }}"
-          echo "📂 Extracting ZIP..."
+          echo "Extracting ZIP..."
           unzip -q project.zip -d extracted_project
-          # Cari direktori root Flutter (berisi pubspec.yaml)
           FLUTTER_ROOT=$(find extracted_project -maxdepth 3 -name "pubspec.yaml" | head -1 | xargs dirname)
           if [ -z "$FLUTTER_ROOT" ]; then
-            echo "❌ ERROR: pubspec.yaml tidak ditemukan dalam ZIP!"
+            echo "ERROR: pubspec.yaml tidak ditemukan dalam ZIP!"
             exit 1
           fi
-          echo "✅ Flutter root ditemukan: $FLUTTER_ROOT"
+          echo "Flutter root: $FLUTTER_ROOT"
           echo "FLUTTER_ROOT=$FLUTTER_ROOT" >> $GITHUB_ENV
 
       - name: Prepare WebView Flutter Project (web_apk)
         if: ${{ github.event.inputs.build_type == 'web_apk' }}
         run: |
-          echo "🌐 Creating WebView Flutter project..."
           flutter create --org com.scbuild --project-name webview_app webview_project
           cd webview_project
-          # Tambah dependency webview_flutter
           flutter pub add webview_flutter
-          # Ganti main.dart dengan WebView wrapper
           cat > lib/main.dart << 'DARTEOF'
           import 'package:flutter/material.dart';
           import 'package:webview_flutter/webview_flutter.dart';
-
-          void main() {
-            runApp(const MyApp());
-          }
-
+          void main() { runApp(const MyApp()); }
           class MyApp extends StatelessWidget {
             const MyApp({super.key});
             @override
@@ -96,18 +87,15 @@ jobs:
               return MaterialApp(
                 title: '${{ github.event.inputs.app_name }}',
                 debugShowCheckedModeBanner: false,
-                theme: ThemeData(primarySwatch: Colors.blue),
                 home: const WebViewScreen(),
               );
             }
           }
-
           class WebViewScreen extends StatefulWidget {
             const WebViewScreen({super.key});
             @override
             State<WebViewScreen> createState() => _WebViewScreenState();
           }
-
           class _WebViewScreenState extends State<WebViewScreen> {
             late final WebViewController _controller;
             @override
@@ -119,22 +107,17 @@ jobs:
             }
             @override
             Widget build(BuildContext context) {
-              return Scaffold(
-                body: SafeArea(child: WebViewWidget(controller: _controller)),
-              );
+              return Scaffold(body: SafeArea(child: WebViewWidget(controller: _controller)));
             }
           }
           DARTEOF
-          # Set minSdkVersion untuk webview_flutter
           sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 19/g' android/app/build.gradle || \
           sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 19/g' android/app/build.gradle || true
           cd ..
           echo "FLUTTER_ROOT=webview_project" >> $GITHUB_ENV
 
       - name: Get Flutter Dependencies
-        run: |
-          cd "$FLUTTER_ROOT"
-          flutter pub get
+        run: cd "$FLUTTER_ROOT" && flutter pub get
 
       - name: Build APK (Release)
         if: ${{ github.event.inputs.build_mode == 'release' }}
@@ -143,7 +126,6 @@ jobs:
           flutter build apk --release --no-tree-shake-icons
           APK_PATH=$(find . -name "*.apk" -path "*/release/*" | head -1)
           echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
-          echo "✅ Build Release selesai: $APK_PATH"
 
       - name: Build APK (Debug)
         if: ${{ github.event.inputs.build_mode == 'debug' }}
@@ -152,9 +134,8 @@ jobs:
           flutter build apk --debug --no-tree-shake-icons
           APK_PATH=$(find . -name "*.apk" -path "*/debug/*" | head -1)
           echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
-          echo "✅ Build Debug selesai: $APK_PATH"
 
-      - name: Rename APK
+      - name: Rename and Upload APK
         run: |
           cd "$FLUTTER_ROOT"
           APP_NAME="${{ github.event.inputs.app_name }}"
@@ -163,7 +144,6 @@ jobs:
           NEW_NAME="${APP_NAME}_${MODE}_${TIMESTAMP}.apk"
           cp "$APK_PATH" "/tmp/${NEW_NAME}"
           echo "FINAL_APK=/tmp/${NEW_NAME}" >> $GITHUB_ENV
-          echo "APK_FILENAME=${NEW_NAME}" >> $GITHUB_ENV
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -174,9 +154,8 @@ jobs:
 
       - name: Build Summary
         run: |
-          echo "## ✅ Build Berhasil!" >> $GITHUB_STEP_SUMMARY
+          echo "## Build Berhasil!" >> $GITHUB_STEP_SUMMARY
           echo "| Info | Detail |" >> $GITHUB_STEP_SUMMARY
           echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
           echo "| Build Type | ${{ github.event.inputs.build_type }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Build Mode | ${{ github.event.inputs.build_mode }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| APK File | $APK_FILENAME |" >> $GITHUB_STEP_SUMMARY
